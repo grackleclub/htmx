@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+
+# gorun simulates running `go run .` by creating a tempoarary binary
+# and also listens for interrupts, Go program termination, or file changes,
+# restarting the Go program if any file changes are detected.
+
+# PID for the active instance of the Go program
+app_pid=""
+
+if [[ -z "$1" ]]; then
+  target_dir="."
+else
+  target_dir="$1"
+fi
+
+# separate output from this script from the Go program
+# by providing a terminal-wide line break with sytlized text
+line_break() {
+  local title
+  title=$(printf " %s %s %s " "$1" "$0" "$1")
+  local width
+  width=$(tput cols)
+  local title_length=$(( ${#title} + 2 ))
+  local fill_length=$(( (width - title_length) / 2 ))
+  printf '%*s' "$fill_length" '' | tr ' ' '-'
+  printf '%s' "$title"
+  printf '%*s\n' "$fill_length" '' | tr ' ' '-'
+}
+
+# use time of last save and list of all files to detect changes
+state() {
+  find ./* -type f -not -name "temp" -exec stat -c "%Y %n" {} \;
+}
+
+# run the Go program with passed arguments
+run_go_app() {
+  exists=$(pgrep temp)
+  if [[ -n $exists ]]; then
+    printf "🪓 Killing running Go program..."
+    if ! pkill temp; then
+      printf "failed. 🤷\n"
+      return 1
+    fi
+    printf "dead. 💀\n"
+  fi
+
+  printf "🏗️  Building new binary..."
+  # This is a binary not a 'go run' because it seems that
+  # go run creates a temporary binary and then runs it,
+  # so we can't capture the PID of the running process.
+  #
+  # Instead, we simulate go run with our own temp binary.
+  if ! go build -o temp "$target_dir"; then
+    printf "failed. 🙀\n"
+    echo "Check to ensure that target directory exists: $target_dir"
+    exit 1
+  fi
+  printf "built! ✅\n"
+
+  # listen for a SIGINT (ctrl-c) and cancel when received
+  trap 'echo; 
+    line_break 🚧;
+    printf "⛔ Cancelling...\n";
+    pkill temp & exit;' INT
+
+  # cleanup temp binary on exit, regardless of cause
+  trap 'printf "🚮 Cleaning up temp binary on exit...";
+    rm -f temp;
+    printf "bye!\n"' EXIT
+
+  echo "🚀 Starting Go app... "
+  line_break 🚧
+
+  # echo the command being run
+  if [[ -z "$*" ]]; then
+    printf "go run .\n"
+  else
+    printf "go run %s\n" "$*"
+  fi
+  ./temp "$@" &
+  app_pid=$!
+}
+
+# exit if the app has terminated, passing along exit code
+exit_if_done() {
+  if ! kill -0 $app_pid 2>/dev/null; then
+    wait $app_pid
+    exit_code=$?
+    line_break 🚧
+    echo "🚫 Go app terminated ($exit_code) exiting..."
+    exit "$exit_code"
+  fi
+  return 0
+}
+
+# initial run before listening for any changes
+line_break 🚧
+echo "👀 Starting and watching for changes..."
+state_old=$(state)
+run_go_app "$@"
+
+# continue to watch for changes, restarting or exiting as appropriate
+while true; do
+  sleep 1
+  exit_if_done
+
+  state_new=$(state)
+  if [[ "$state_old" != "$state_new" ]]; then
+    line_break 🚧
+    echo "🔄 File change detected!"
+    run_go_app "$@"
+    state_old=$state_new
+  fi
+done
