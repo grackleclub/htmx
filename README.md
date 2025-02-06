@@ -12,5 +12,5 @@ $ bin/go-run
 
 Run with arguments and path for more advanced uses.
 ```sh
-$ bin/go-run ./cmd/server arg1 arg2
+$ bin/go-run ./example arg1 arg2
 ```

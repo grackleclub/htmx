@@ -10,7 +10,7 @@ import (
 
 func main() {
 	var file = path.Join("static", "test.txt")
-	iterations := 5
+	iterations := 10
 	for i := range iterations {
 		b, err := os.ReadFile(file)
 		if err != nil {
