@@ -1,29 +1,57 @@
-package trash
+package template
 
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
 	"reflect"
 	"strings"
 	"text/template"
 )
 
-var strictTemplateChecking = true
+var (
+	Strict         bool // Strict template checking
+	ErrValidation  = fmt.Errorf("template validation failed")
+	ErrMissingData = fmt.Errorf("source data value not present")
+)
 
-// writeTemplate executes a set of templates (defined by their path)
-// and injects data from any struct, writing the output to the response writer.
-//
-// When strictTemplateChecking is true, it will re-render the template with data,
-// ensuring that all values from the passe struct that can be refleted as strings
-// are present in the rendered template.
-func writeTemplate(w http.ResponseWriter, templatePaths []string, data interface{}) error {
-	tmpl, err := template.ParseFS(os.DirFS("."), templatePaths...)
+// Assets represents a static directory which contains assets and templates
+type Assets struct {
+	dir []fs.DirEntry
+	fs  fs.FS
+}
+
+// New provides a new Assets object when given a filesystem and a directory name.
+// Methods are provided to serve htmx components and write templates.
+func New(filesystem fs.FS, staticDir string) (*Assets, error) {
+	dir, err := fs.ReadDir(filesystem, staticDir)
 	if err != nil {
-		return fmt.Errorf("failed to parse template: %w", err)
+		return nil, fmt.Errorf("open static dir: %w", err)
 	}
+	return &Assets{dir: dir, fs: filesystem}, nil
+}
+
+// serveHtmx dynamically serves htmx components based on the path
+func serveHtmx(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// WriteTemplate executes a set of templates (defined by their path)
+// and injects data from any struct, writing the output to the provided writer.
+//
+// When Strict is true, buffer will be checked for presence of all data values,
+// and if any are missing, return ErrMissingDatato allow for errors.Is() comparison.
+//
+// Strict checking may incur performance penalties.
+func (h *Assets) WriteTemplate(w io.Writer, templatePaths []string, data interface{}) error {
+	tmpl, err := template.ParseFS(h.fs, templatePaths...) // todo can we not keep the filesystem obj since it's already parsed in New?
+	if err != nil {
+		return fmt.Errorf("parse template: %w", err)
+	}
+
 	// write to buffer first to allow inspection
 	// because if a child template is called before a parent template,
 	// the output will be empty
@@ -32,51 +60,43 @@ func writeTemplate(w http.ResponseWriter, templatePaths []string, data interface
 	if err != nil {
 		return fmt.Errorf("execute template: %w", err)
 	}
-	if buf.Len() == 0 {
+	len := buf.Len()
+	if len == 0 {
 		return fmt.Errorf("template output is empty")
 	}
+
+	if Strict {
+		content, err := parseContent(data)
+		if err != nil {
+			return fmt.Errorf("strict check, parse content: %w", err)
+		}
+		for k, v := range content {
+			exptectedValue, ok := v.(string)
+			if !ok {
+				slog.Warn("skipping template validation for non-string value",
+					"key", k,
+					"value", v,
+				)
+				continue
+			}
+			if !strings.Contains(buf.String(), exptectedValue) {
+				return fmt.Errorf("key %q: %w: %w", k, ErrMissingData, ErrValidation)
+			}
+			slog.Debug("data value exists in rendered template", "key", k)
+		}
+	}
+
 	b, err := buf.WriteTo(w)
 	if err != nil {
 		return fmt.Errorf("write template to response: %w", err)
 	}
 	slog.Debug("template(s) executed",
-		"bytes_read", buf.Len(),
+		"bytes_read", len,
 		"bytes_written", b,
 		"templates", templatePaths,
 		"data", data, // TODO exclude data after testing
 	)
 
-	// validate
-	if strictTemplateChecking {
-		// Only because I don't know how to tee a buffer to two outputs,
-		// here we parse the content again to validate that the template
-		// contains all the values in the data structure.
-		var buf bytes.Buffer
-		err = tmpl.Execute(&buf, data)
-		if err != nil {
-			return fmt.Errorf("failed to execute template: %w", err)
-		}
-		if data == nil {
-			slog.Warn("skipping template validation because data is nil")
-			return nil
-		}
-		templateContents := buf.String()
-		content, err := parseContent(data)
-		if err != nil {
-			return fmt.Errorf("failed to parse content: %w", err)
-		}
-		for k, v := range content {
-			exptectedValue, ok := v.(string)
-			if !ok {
-				slog.Warn("skipping template validation for non-string value", "key", k, "value", v)
-				continue
-			}
-			if !strings.Contains(templateContents, exptectedValue) {
-				return fmt.Errorf("template contents do not contain value for key '%s'", k)
-			}
-			slog.Debug("data value exists in rendered template", "key", k)
-		}
-	}
 	return nil
 }
 
